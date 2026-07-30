@@ -1,0 +1,189 @@
+#!/bin/bash
+
+# =================================================================
+# 0. Pre-parsing degli argomenti per estrarre l'opzione Verbose
+# =================================================================
+VERBOSE=false
+ARGOMENTI_PULITI=()
+
+for arg in "$@"; do
+    if [ "$arg" == "-v" ] || [ "$arg" == "--verbose" ]; then
+        VERBOSE=true
+    else
+        ARGOMENTI_PULITI+=("$arg")
+    fi
+done
+
+# Ripristina i parametri posizionali escludendo i flag verbose
+set -- "${ARGOMENTI_PULITI[@]}"
+
+# Funzione per stampare l'aiuto in linea
+mostra_help() {
+    echo "================================================================="
+    echo "  DNS TEST ENGINE - CLI Wrapper"
+    echo "================================================================="
+    echo "Uso:"
+    echo "  ./dns-test [opzioni] [suite] <dns4_server> [dns6_server]"
+    echo ""
+    echo "Sintassi Flessibile (Rilevamento Automatico):"
+    echo "  Se ometti la suite e passi direttamente gli IP, il sistema avvierà"
+    echo "  automaticamente i test in modalità parallela multi-stack."
+    echo ""
+    echo "Argomenti:"
+    echo "  suite         Opzionale. Valori ammessi: from_ipv4, from_ipv6, all"
+    echo "  dns4_server   Obbligatorio. L'indirizzo IPv4 del DNS da testare"
+    echo "  dns6_server   Opzionale. L'indirizzo IPv6 del DNS da testare"
+    echo ""
+    echo "Opzioni:"
+    echo "  -h, --help     Mostra questa schermata di aiuto"
+    echo "  -v, --verbose  Mostra dettagli avanzati (tipo test, atteso vs ricevuto)"
+    echo ""
+    echo "Esempi di utilizzo:"
+    echo "  1. Multi-stack automatico (Consigliato):"
+    echo "     ./dns-test 8.8.8.8 2001:4860:4860::8888"
+    echo ""
+    echo "  2. Con modalità dettagliata (Verbose):"
+    echo "     ./dns-test -v from_ipv4 8.8.8.8"
+    echo "================================================================="
+    exit 0
+}
+
+# 1. Controllo se l'utente ha chiesto esplicitamente l'Help
+if [ "$1" == "--help" ] || [ "$1" == "-h" ]; then
+    mostra_help
+fi
+
+# 2. Controllo dei parametri minimi (se non ha chiesto help, deve esserci almeno un IP)
+if [ -z "$1" ]; then
+    echo "Errore: Mancano gli argomenti di rete."
+    echo "Digita './dns-test --help' per vedere la sintassi corretta."
+    exit 1
+fi
+
+# 3. Logica di assegnazione Intelligente
+if [[ $1 == *.* ]]; then
+    # Se il primo argomento contiene un punto, è un IPv4 (l'utente ha omesso la suite)
+    SUITE="all"
+    DNS4=$1
+    DNS6=$2
+else
+    # Altrimenti l'utente ha specificato esplicitamente la suite
+    SUITE=$1
+    DNS4=$2
+    DNS6=$3
+
+    # Controllo di sicurezza aggiuntivo se l'utente scrive una stringa sbagliata al posto della suite
+    if [ "$SUITE" != "from_ipv4" ] && [ "$SUITE" != "from_ipv6" ] && [ "$SUITE" != "all" ]; then
+        echo "Errore: Suite '$SUITE' non riconosciuta."
+        echo "Usa: from_ipv4, from_ipv6, all oppure passa direttamente l'indirizzo IPv4."
+        exit 1
+    fi
+fi
+
+# 4. Costruzione del payload JSON dinamico
+if [ -z "$DNS6" ]; then
+    PAYLOAD=$(printf '{"suite":"%s","dns4_server":"%s"}' "$SUITE" "$DNS4")
+else
+    PAYLOAD=$(printf '{"suite":"%s","dns4_server":"%s","dns6_server":"%s"}' "$SUITE" "$DNS4" "$DNS6")
+fi
+
+# 5. Chiamata API al server FastAPI
+RESPONSE=$(curl -s -X POST http://127.0.0.1:8000/api/run-suite \
+     -H "Content-Type: application/json" \
+     -d "$PAYLOAD")
+
+# 6. Formattazione dell'output (Enterprise CLI View)
+if command -v jq &> /dev/null; then
+    # Definiamo i colori per l'output
+    GREEN='\033[0;32m'
+    RED='\033[0;31m'
+    YELLOW='\033[1;33m'
+    CYAN='\033[0;36m'
+    NC='\033[0m' # No Color (Reset)
+
+    echo -e "\n${CYAN}=================================================================${NC}"
+    echo -e "${CYAN}                    PROBER DNS - FLASHSTART                      ${NC}"
+    echo -e "${CYAN}=================================================================${NC}"
+
+    # Estraiamo i metadati generali della suite dal JSON
+    SUITE_REQ=$(echo "$RESPONSE" | jq -r '.suite_richiesta')
+    DNS4_USED=$(echo "$RESPONSE" | jq -r '.dns4_server_utilizzato // "N/A"')
+    DNS6_USED=$(echo "$RESPONSE" | jq -r '.dns6_server_utilizzato // "N/A"')
+
+    echo -e " ${YELLOW}Suite Eseguita :${NC} $SUITE_REQ"
+    echo -e " ${YELLOW}Target IPv4    :${NC} $DNS4_USED"
+    echo -e " ${YELLOW}Target IPv6    :${NC} $DNS6_USED"
+    echo -e "${CYAN}-----------------------------------------------------------------${NC}"
+
+    # Iteriamo sui singoli risultati contenuti nell'array 'results'
+    echo "$RESPONSE" | jq -c '.results[]' | while read -r item; do
+        T_ID=$(echo "$item" | jq -r '.test_id')
+        STATUS=$(echo "$item" | jq -r '.status')
+        SUMMARY=$(echo "$item" | jq -r '.summary')
+
+        # Formattazione condizionale basata sullo stato del test
+        if [ "$STATUS" == "PASS" ]; then
+            printf " [${GREEN}PASS${NC}] %-25s : %s\n" "$T_ID" "$SUMMARY"
+        elif [ "$STATUS" == "FAIL" ]; then
+            printf " [${RED}FAIL${NC}] %-25s : %s\n" "$T_ID" "$SUMMARY"
+        else
+            # Se è ERROR, proviamo ad estrarre anche il messaggio di errore specifico
+            ERR_MSG=$(echo "$item" | jq -r '.details.error_message // "Errore Sconosciuto"')
+            printf " [${RED}ERR!${NC}] %-25s : %s (${RED}%s${NC})\n" "$T_ID" "$SUMMARY" "$ERR_MSG"
+        fi
+
+        # =================================================================
+        # ESTENSIONE VERBOSE: Logica di visualizzazione dei dettagli di debug
+        # =================================================================
+        if [ "$VERBOSE" == "true" ]; then
+            T_TYPE=$(echo "$item" | jq -r '.test_type // "UNKNOWN"')
+            echo -e "        ${CYAN}├─ Tipo Test:${NC} $T_TYPE"
+
+            # 1. Dati Osservati (Ricevuti)
+            OBSERVED=$(echo "$item" | jq -c '.details.observed_data // empty')
+            if [ -n "$OBSERVED" ] && [ "$OBSERVED" != "null" ]; then
+                echo -e "        ${CYAN}├─ Ricevuto :${NC} ${GREEN}$OBSERVED${NC}"
+            fi
+
+            # 2. Criteri Attesi (Operatori logici ed asserzioni)
+            # Controlla se la struttura delle asserzioni ha un operatore diretto 'op'
+            HAS_OP=$(echo "$item" | jq -r '.details.expected_assertions.op // empty')
+            if [ -n "$HAS_OP" ] && [ "$HAS_OP" != "null" ]; then
+                OP=$(echo "$item" | jq -r '.details.expected_assertions.op')
+                VAL=$(echo "$item" | jq -c '.details.expected_assertions.value')
+                echo -e "        ${CYAN}├─ Atteso   :${NC} Controllo tipo [${YELLOW}$OP${NC}] su valore/i: $VAL"
+            else
+                # Se è un dizionario più complesso o nidificato, lo iteriamo dinamicamente
+                ASSERTIONS_STR=$(echo "$item" | jq -r '.details.expected_assertions | to_entries[] | "        │  • \(.key): \(.value)"' 2>/dev/null)
+                if [ -n "$ASSERTIONS_STR" ]; then
+                    echo -e "        ${CYAN}├─ Criteri Attesi (Assertions):${NC}"
+                    echo "$ASSERTIONS_STR"
+                fi
+            fi
+
+            # 3. Report Analitico in caso di Fallimento Logico (FAIL) o Errore di Rete
+            if [ "$STATUS" == "FAIL" ]; then
+                EVAL_STR=$(echo "$item" | jq -r '.details.evaluation_report | to_entries[] | "        │  • Regola [\(.key)] -> Superata: \(.value.passed) (Valore riscontrato: \(.value.actual // "N/A"))"' 2>/dev/null)
+                if [ -n "$EVAL_STR" ] && [ "$EVAL_STR" != "null" ]; then
+                    echo -e "        ${CYAN}├─ Report Errori:${NC}"
+                    echo "$EVAL_STR"
+                fi
+            fi
+
+            if [ "$STATUS" == "ERROR" ]; then
+                ERR_CODE=$(echo "$item" | jq -r '.details.error_code // "N/A"')
+                echo -e "        ${CYAN}├─ Codice Errore Rete:${NC} ${RED}$ERR_CODE${NC}"
+            fi
+
+            echo -e "        ${CYAN}└─────────────────────────────────────────────────${NC}"
+        fi
+
+    done
+    echo -e "${CYAN}=================================================================\n${NC}"
+
+else
+    # Fallback di sicurezza: se jq non è installato sulla macchina dell'operatore,
+    # stampiamo il JSON per non perdere i dati.
+    echo -e "\n[ATTENZIONE] L'utility 'jq' non è installata. Mostro l'output JSON grezzo:\n"
+    echo "$RESPONSE"
+fi
