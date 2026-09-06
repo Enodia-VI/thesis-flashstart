@@ -1,8 +1,0 @@
-.venv/
-__pycache__/
-*.pyc
-logs/
-.env
-.idea/
-.claude
-data/dns_servers.json
