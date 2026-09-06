@@ -4,7 +4,6 @@ class Evaluator:
     def evaluate(cls, observed, assertions):
 
         groups = {}
-
         overall_result = True
 
         if "all" in assertions:
@@ -23,10 +22,7 @@ class Evaluator:
 
         if "any" in assertions:
 
-            any_results = [
-                cls.evaluate_assertion(observed, a)
-                for a in assertions["any"]
-            ]
+            any_results = [cls.evaluate_assertion(observed, a) for a in assertions["any"]]
 
             groups["any"] = {
                 "passed": any(r["passed"] for r in any_results),

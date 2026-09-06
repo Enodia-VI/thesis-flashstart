@@ -4,31 +4,23 @@ import dns.message
 import dns.rdatatype
 import dns.exception
 import dns.resolver
-
 from api.dictionaries import PluginOutput, BasePlugin, PluginError, DnsInput
 
-
+"""
+    Definizione del plugin principale per i test DNS
+"""
 class DnsPlugin(BasePlugin):
 
     async def run(self, input_data: dict, resolver: str) -> PluginOutput:
         try:
             parsed = DnsInput(**input_data)
-            query = self._build_query(
-                parsed.qname,
-                parsed.qtype
-            )
+            query = self._build_query(parsed.qname,parsed.qtype)
 
-            # Rimosso loop.run_in_executor!
-            # Ora eseguiamo direttamente la coroutine in modo 100% asincrono.
             data = await self._query_dns(resolver, query)
 
-            return PluginOutput(
-                ok=True,
-                data=data,
-                error=None
-            )
+            return PluginOutput(ok=True,data=data,error=None)
 
-        # ------------------------- ERROR MAPPING -------------------------
+        # Gestion degli errori ed eventuale output
 
         except dns.exception.Timeout:
             return self._error("DNS_TIMEOUT", "Timeout contacting DNS server")
@@ -46,22 +38,13 @@ class DnsPlugin(BasePlugin):
         except Exception as e:
             return self._error("DNS_UNKNOWN_ERROR", str(e))
 
-    # ---------------- INTERNAL ----------------
+
 
     @staticmethod
     def _error(code: str, message: str) -> PluginOutput:
-        # 1. Costruiamo prima l'oggetto interno tipizzato correttamente
-        typed_error = PluginError(
-            code=code,
-            message=message
-        )
+        typed_error = PluginError(code=code,message=message)
 
-        # 2. Passiamo l'oggetto tipizzato all'output principale
-        return PluginOutput(
-            ok=False,
-            data=None,
-            error=typed_error
-        )
+        return PluginOutput(ok=False,data=None,error=typed_error)
 
     @staticmethod
     def _build_query(domain, qtype):
@@ -71,14 +54,6 @@ class DnsPlugin(BasePlugin):
     @staticmethod
     async def _query_dns(where, query):
 
-        answer = await dns.asyncquery.udp(
-            query,
-            where,
-            timeout=10
-        )
+        answer = await dns.asyncquery.udp(query,where,timeout=10)
 
-        return [
-            str(rdata)
-            for rrset in answer.answer
-            for rdata in rrset
-        ]
+        return [str(rdata) for rrset in answer.answer for rdata in rrset]
